@@ -308,16 +308,21 @@ std::unique_ptr<CompilerInstance> BuildCompilerInstance(
 
   auto Clang = std::make_unique<CompilerInstance>(session.PCH);
   Clang->setInvocation(std::move(CI));
-  Clang->setVirtualFileSystem(FS);
   Clang->createDiagnostics(&DC, false);
   Clang->setTarget(TargetInfo::CreateTargetInfo(
       Clang->getDiagnostics(), Clang->getInvocation().TargetOpts));
   if (!Clang->hasTarget())
     return nullptr;
+  Clang->getPreprocessorOpts().RetainRemappedFileBuffers = true;
   // Construct SourceManager with UserFilesAreVolatile: true because otherwise
   // RequiresNullTerminator: true may cause out-of-bounds read when a file is
   // mmap'ed but is saved concurrently.
+#if LLVM_VERSION_MAJOR >= 9 // rC357037
+  Clang->createFileManager(FS);
+#else
+  Clang->setVirtualFileSystem(FS);
   Clang->createFileManager();
+#endif
   Clang->setSourceManager(new SourceManager(Clang->getDiagnostics(),
                                             Clang->getFileManager(), true));
   auto &IS = Clang->getFrontendOpts().Inputs;
@@ -358,6 +363,7 @@ void BuildPreamble(Session &session, CompilerInvocation &CI,
   CI.getDiagnosticOpts().IgnoreWarnings = false;
   CI.getFrontendOpts().SkipFunctionBodies = true;
   CI.getLangOpts()->CommentOpts.ParseAllComments = g_config->index.comments > 1;
+  CI.getLangOpts()->RetainCommentsFromSystemHeaders = true;
 
   StoreDiags DC(task.path);
   IntrusiveRefCntPtr<DiagnosticsEngine> DE =
@@ -489,7 +495,6 @@ void *CompletionMain(void *manager_) {
     Clang->setCodeCompletionConsumer(task->Consumer.release());
     if (!Parse(*Clang))
       continue;
-    Buf.release();
 
     task->on_complete(&Clang->getCodeCompletionConsumer());
   }
@@ -579,7 +584,6 @@ void *DiagnosticMain(void *manager_) {
       continue;
     if (!Parse(*Clang))
       continue;
-    Buf.release();
 
     auto Fill = [](const DiagBase &d, Diagnostic &ret) {
       ret.range = lsRange{{d.range.start.line, d.range.start.column},

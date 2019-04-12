@@ -298,7 +298,10 @@ bool Indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
                            request.mode != IndexMode::Background);
       {
         std::lock_guard lock1(vfs->mutex);
-        vfs->state[path_to_index].loaded++;
+        VFS::State &st = vfs->state[path_to_index];
+        st.loaded++;
+        if (prev->no_linkage)
+          st.step = 2;
       }
       lock.unlock();
 
@@ -317,6 +320,8 @@ bool Indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
             continue;
           st.loaded++;
           st.timestamp = prev->mtime;
+          if (prev->no_linkage)
+            st.step = 3;
         }
         IndexUpdate update = IndexUpdate::CreateDelta(nullptr, prev.get());
         on_indexed->PushBack(std::move(update),
@@ -341,9 +346,9 @@ bool Indexer_Parse(SemaManager *completion, WorkingFiles *wfiles,
 
   std::vector<std::unique_ptr<IndexFile>> indexes;
   if (deleted) {
-    indexes.push_back(std::make_unique<IndexFile>(request.path, ""));
+    indexes.push_back(std::make_unique<IndexFile>(request.path, "", false));
     if (request.path != path_to_index)
-      indexes.push_back(std::make_unique<IndexFile>(path_to_index, ""));
+      indexes.push_back(std::make_unique<IndexFile>(path_to_index, "", false));
   } else {
     std::vector<std::pair<std::string, std::string>> remapped;
     if (g_config->index.onChange) {

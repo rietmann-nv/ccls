@@ -81,7 +81,8 @@ struct IndexParam {
 
       if (!vfs.Stamp(path, it->second.mtime, no_linkage ? 3 : 1))
         return;
-      it->second.db = std::make_unique<IndexFile>(path, it->second.content);
+      it->second.db =
+          std::make_unique<IndexFile>(path, it->second.content, no_linkage);
     }
   }
 
@@ -1173,11 +1174,12 @@ public:
 };
 } // namespace
 
-const int IndexFile::kMajorVersion = 20;
+const int IndexFile::kMajorVersion = 21;
 const int IndexFile::kMinorVersion = 0;
 
-IndexFile::IndexFile(const std::string &path, const std::string &contents)
-    : path(path), file_contents(contents) {}
+IndexFile::IndexFile(const std::string &path, const std::string &contents,
+                     bool no_linkage)
+    : path(path), no_linkage(no_linkage), file_contents(contents) {}
 
 IndexFunc &IndexFile::ToFunc(Usr usr) {
   auto [it, inserted] = usr2func.try_emplace(usr);
@@ -1236,8 +1238,8 @@ Index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
   ok = false;
   // -fparse-all-comments enables documentation in the indexer and in
   // code completion.
-  if (g_config->index.comments > 1)
-    CI->getLangOpts()->CommentOpts.ParseAllComments = true;
+  CI->getLangOpts()->CommentOpts.ParseAllComments = g_config->index.comments > 1;
+  CI->getLangOpts()->RetainCommentsFromSystemHeaders = true;
   std::string buf = wfiles->GetContent(main);
   std::vector<std::unique_ptr<llvm::MemoryBuffer>> Bufs;
   if (buf.size())
@@ -1249,12 +1251,18 @@ Index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
   DiagnosticConsumer DC;
   auto Clang = std::make_unique<CompilerInstance>(PCH);
   Clang->setInvocation(std::move(CI));
-  Clang->setVirtualFileSystem(FS);
   Clang->createDiagnostics(&DC, false);
   Clang->setTarget(TargetInfo::CreateTargetInfo(
       Clang->getDiagnostics(), Clang->getInvocation().TargetOpts));
   if (!Clang->hasTarget())
     return {};
+  Clang->getPreprocessorOpts().RetainRemappedFileBuffers = true;
+#if LLVM_VERSION_MAJOR >= 9 // rC357037
+  Clang->createFileManager(FS);
+#else
+  Clang->setVirtualFileSystem(FS);
+  Clang->createFileManager();
+#endif
 
   IndexParam param(*vfs, no_linkage);
   auto DataConsumer = std::make_shared<IndexDataConsumer>(param);
@@ -1266,6 +1274,7 @@ Index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
     IndexOpts.IndexFunctionLocals = true;
     IndexOpts.IndexImplicitInstantiation = true;
 #if LLVM_VERSION_MAJOR >= 9
+
     IndexOpts.IndexParametersInDeclarations =
         g_config->index.parametersInDeclarations;
     IndexOpts.IndexTemplateParameters = true;
@@ -1294,8 +1303,6 @@ Index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
     LOG_S(ERROR) << "failed to index " << main;
     return {};
   }
-  for (auto &Buf : Bufs)
-    Buf.release();
 
   std::vector<std::unique_ptr<IndexFile>> result;
   for (auto &it : param.UID2File) {
